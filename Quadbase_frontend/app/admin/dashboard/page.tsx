@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { LogOut, Trash2, Upload, List, Loader2, AlertCircle, RefreshCw } from "lucide-react"
+import { LogOut, Trash2, Upload, List, Loader2, AlertCircle, RefreshCw, Key } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -12,11 +12,11 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { useAuth } from "@/lib/auth-context"
+import { useAuth, apiFetch } from "@/lib/auth-context"
 import type { Paper } from "@/components/result-card"
 
 export default function AdminDashboardPage() {
-  const { isAuthenticated, logout } = useAuth()
+  const { isAuthenticated, isInitializing, logout } = useAuth()
   const router = useRouter()
 
   const [papers, setPapers] = useState<Paper[]>([])
@@ -29,6 +29,8 @@ export default function AdminDashboardPage() {
     authors: "",
     categories: "",
     abstract: "",
+    pdf_url: "",
+    abs_url: "",
   })
   const [uploadLoading, setUploadLoading] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
@@ -36,11 +38,41 @@ export default function AdminDashboardPage() {
 
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
+  const [passwordData, setPasswordData] = useState({ currentPassword: "", newPassword: "" })
+  const [passwordLoading, setPasswordLoading] = useState(false)
+  const [passwordSuccess, setPasswordSuccess] = useState(false)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+
+  const handlePasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setPasswordLoading(true)
+    setPasswordError(null)
+    setPasswordSuccess(false)
+    try {
+      const res = await apiFetch(`/api/admin/password`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(passwordData)
+      })
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || "Password change failed")
+      }
+      setPasswordData({ currentPassword: "", newPassword: "" })
+      setPasswordSuccess(true)
+      setTimeout(() => setPasswordSuccess(false), 4000)
+    } catch (err) {
+      setPasswordError(err instanceof Error ? err.message : "Password change failed")
+    } finally {
+      setPasswordLoading(false)
+    }
+  }
+
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isInitializing && !isAuthenticated) {
       router.push("/admin/login")
     }
-  }, [isAuthenticated, router])
+  }, [isAuthenticated, isInitializing, router])
 
   const fetchPapers = useCallback(async () => {
     setListLoading(true)
@@ -80,21 +112,20 @@ export default function AdminDashboardPage() {
     setUploadSuccess(false)
 
     try {
-      const token = sessionStorage.getItem("quadbase_admin_token") ?? ""
-      const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"
       const payload = {
         id: formData.id || undefined,
         title: formData.title,
         authors: formData.authors.split(",").map((a) => a.trim()).filter(Boolean),
         categories: formData.categories.split(",").map((c) => c.trim()).filter(Boolean),
         abstract: formData.abstract,
+        pdf_url: formData.pdf_url,
+        abs_url: formData.abs_url,
       }
 
-      const res = await fetch(`${API}/api/papers`, {
+      const res = await apiFetch(`/api/papers`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": token,
         },
         body: JSON.stringify(payload),
       })
@@ -104,7 +135,7 @@ export default function AdminDashboardPage() {
         throw new Error(data.error || `Upload failed (${res.status})`)
       }
 
-      setFormData({ id: "", title: "", authors: "", categories: "", abstract: "" })
+      setFormData({ id: "", title: "", authors: "", categories: "", abstract: "", pdf_url: "", abs_url: "" })
       setUploadSuccess(true)
       setTimeout(() => setUploadSuccess(false), 4000)
       await fetchPapers()
@@ -119,10 +150,8 @@ export default function AdminDashboardPage() {
     setDeletingId(id)
     const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"
     try {
-      const token = sessionStorage.getItem("quadbase_admin_token") ?? ""
-      const res = await fetch(`${API}/api/papers/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { "Authorization": token },
+      const res = await apiFetch(`/api/papers/${encodeURIComponent(id)}`, {
+        method: "DELETE"
       })
       if (!res.ok) {
         const data = await res.json()
@@ -134,6 +163,14 @@ export default function AdminDashboardPage() {
     } finally {
       setDeletingId(null)
     }
+  }
+
+  if (isInitializing) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/20">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    )
   }
 
   if (!isAuthenticated) return null
@@ -170,7 +207,7 @@ export default function AdminDashboardPage() {
         </h1>
 
         <Tabs defaultValue="upload" className="w-full">
-          <TabsList className="grid w-full max-w-md grid-cols-2 mb-6">
+          <TabsList className="grid w-full max-w-2xl grid-cols-3 mb-6">
             <TabsTrigger value="upload" className="gap-2">
               <Upload className="h-4 w-4" />
               Upload Paper
@@ -178,6 +215,10 @@ export default function AdminDashboardPage() {
             <TabsTrigger value="manage" className="gap-2">
               <List className="h-4 w-4" />
               Manage Papers
+            </TabsTrigger>
+            <TabsTrigger value="security" className="gap-2">
+              <Key className="h-4 w-4" />
+              Security
             </TabsTrigger>
           </TabsList>
 
@@ -238,6 +279,29 @@ export default function AdminDashboardPage() {
                       placeholder="Author names (comma-separated)"
                       required
                     />
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="pdf_url">PDF URL (optional)</Label>
+                      <Input
+                        id="pdf_url"
+                        name="pdf_url"
+                        value={formData.pdf_url}
+                        onChange={handleInputChange}
+                        placeholder="e.g., https://arxiv.org/pdf/..."
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="abs_url">Abstract URL (optional)</Label>
+                      <Input
+                        id="abs_url"
+                        name="abs_url"
+                        value={formData.abs_url}
+                        onChange={handleInputChange}
+                        placeholder="e.g., https://arxiv.org/abs/..."
+                      />
+                    </div>
                   </div>
 
                   <div className="space-y-2">
@@ -403,6 +467,35 @@ export default function AdminDashboardPage() {
                     </Table>
                   </div>
                 )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="security">
+            <Card>
+              <CardHeader>
+                <CardTitle>Security Settings</CardTitle>
+                <CardDescription>
+                  Change your master admin password safely.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handlePasswordChange} className="space-y-4 max-w-sm">
+                  <div className="space-y-2">
+                    <Label htmlFor="currentPassword">Current Password</Label>
+                    <Input id="currentPassword" type="password" value={passwordData.currentPassword} onChange={(e) => setPasswordData(prev => ({...prev, currentPassword: e.target.value}))} required />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="newPassword">New Password (min 6 characters)</Label>
+                    <Input id="newPassword" type="password" value={passwordData.newPassword} onChange={(e) => setPasswordData(prev => ({...prev, newPassword: e.target.value}))} required minLength={6} />
+                  </div>
+                  <Button type="submit" disabled={passwordLoading} className="w-full">
+                    {passwordLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Key className="h-4 w-4 mr-2" />}
+                    Update Password
+                  </Button>
+                  {passwordError && <p className="text-sm text-destructive mt-2">{passwordError}</p>}
+                  {passwordSuccess && <p className="text-sm text-green-600 mt-2">Password changed successfully!</p>}
+                </form>
               </CardContent>
             </Card>
           </TabsContent>

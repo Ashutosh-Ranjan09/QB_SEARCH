@@ -1,8 +1,35 @@
+require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const redis = require('redis');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+
+// Use your Neon Postgres connection string (set in environment variable or hardcoded for now)
+const PG_CONNECTION_STRING = process.env.PG_CONNECTION_STRING || 'YOUR_NEON_CONNECTION_STRING_HERE';
+const pgPool = new Pool({ connectionString: PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false } });
+
+// Ensure refresh_tokens table exists on startup
+async function ensureSchema() {
+    try {
+        await pgPool.query(`
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id          SERIAL PRIMARY KEY,
+                admin_id    INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                token_hash  TEXT    NOT NULL UNIQUE,
+                expires_at  TIMESTAMPTZ NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        `);
+        console.log('✓ refresh_tokens table ready');
+    } catch (err) {
+        console.error('Schema init error:', err.message);
+    }
+}
+ensureSchema();
 
 const app = express();
 const PORT = 3001;
@@ -14,31 +41,94 @@ app.use(cors());          // allow Next.js frontend (and any origin) in dev
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
-// Config  (move to .env in production)
+// Config  (Loaded via .env)
 // ---------------------------------------------------------------------------
-const ADMIN_SECRET = 'super_secret_uber_key';
-const ADMIN_PASSWORD = 'admin';
 
 // ---------------------------------------------------------------------------
 // Redis
 // ---------------------------------------------------------------------------
-const redisClient = redis.createClient();
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const redisClient = redis.createClient({ url: REDIS_URL });
 redisClient.on('error', (err) => console.log('Redis Client Error', err));
 redisClient.connect();
 
 // ---------------------------------------------------------------------------
 // Solr
 // ---------------------------------------------------------------------------
-const SOLR_NODES = [
-    'http://localhost:8983/solr/qb_collection',
-    'http://localhost:8984/solr/qb_collection',
-];
-const SOLR_UPDATE_URL = 'http://localhost:8983/solr/qb_collection/update?commit=true';
+// Pass comma-separated URLs via SOLR_NODES env var
+const solrNodesEnv = process.env.SOLR_NODES;
+const SOLR_NODES = solrNodesEnv 
+    ? solrNodesEnv.split(',').map(n => n.trim()) 
+    : [
+        'http://localhost:8983/solr/qb_collection',
+        'http://localhost:8984/solr/qb_collection',
+      ];
 
-/** Pick a random Solr node for read load-balancing. */
-function solrNode() {
-    return SOLR_NODES[Math.floor(Math.random() * SOLR_NODES.length)];
+// Default to the first node in the array for the update URL if not explicitly provided
+const SOLR_UPDATE_URL = process.env.SOLR_UPDATE_URL || `${SOLR_NODES[0]}/update?commit=true`;
+
+/** 
+ * Pick a Solr node using Round-Robin for perfect read load-balancing, 
+ * with fallback retries to the next nodes if one goes down.
+ */
+let currentSolrNodeIndex = 0;
+
+async function fetchFromSolr(endpoint, config) {
+    const startIndex = currentSolrNodeIndex;
+    // Advance round-robin index for the next request
+    currentSolrNodeIndex = (currentSolrNodeIndex + 1) % SOLR_NODES.length;
+    
+    let lastError;
+    // Attempt all nodes starting from the startIndex
+    for (let i = 0; i < SOLR_NODES.length; i++) {
+        const nodeIndex = (startIndex + i) % SOLR_NODES.length;
+        const node = SOLR_NODES[nodeIndex];
+        try {
+            return await axios.get(`${node}${endpoint}`, config);
+        } catch (err) {
+            console.error(`Solr node ${node} failed. Trying next...`);
+            lastError = err;
+        }
+    }
+    throw lastError;
 }
+
+// ---------------------------------------------------------------------------
+// Postgres Table Creation Endpoints (for one-time setup)
+// ---------------------------------------------------------------------------
+// NOTE: Remove or protect these endpoints after tables are created!
+
+app.post('/api/init-db', async (req, res) => {
+    try {
+        // Admins table
+        await pgPool.query(`
+            CREATE TABLE IF NOT EXISTS admins (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(100) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        `);
+        // Papers table
+        await pgPool.query(`
+            CREATE TABLE IF NOT EXISTS papers (
+                id VARCHAR(32) PRIMARY KEY,
+                title TEXT NOT NULL,
+                abstract TEXT,
+                authors TEXT[],
+                categories TEXT[],
+                published TIMESTAMPTZ,
+                updated TIMESTAMPTZ,
+                pdf_url TEXT,
+                abs_url TEXT
+            );
+        `);
+        res.json({ success: true, message: 'Tables created or already exist.' });
+    } catch (err) {
+        console.error('DB init error:', err);
+        res.status(500).json({ error: 'Failed to create tables', details: err.message });
+    }
+});
 
 // ---------------------------------------------------------------------------
 // Query-analysis helpers  (ported from the Next.js search route)
@@ -76,9 +166,7 @@ function buildSearchParams(rawQuery, hints, rows, start, category, sort) {
         'title^6',
         'abstract^3',
         `authors^${authorBoost}`,
-        'categories^1.5',
-        'title_ngram^2',     // edge n-gram: partial words match full words
-        'abstract_ngram^1',
+        'categories^1.5'
     ].join(' ');
 
     // ── 2. Phrase boosting (pf / pf2 / pf3) ──────────────────────────────
@@ -133,7 +221,7 @@ function buildSearchParams(rawQuery, hints, rows, start, category, sort) {
         qf, pf, pf2, pf3,
         ps, ps2, ps3,
         mm, tie, bq,
-        fl: 'id,title,authors,categories,abstract,score',
+        fl: 'id,title,authors,categories,abstract,score,pdf_url,abs_url',
         rows: String(rows),
         start: String(start),
         wt: 'json',
@@ -154,6 +242,8 @@ function normaliseDocs(docs) {
         categories: Array.isArray(doc.categories) ? doc.categories : doc.categories ? [String(doc.categories)] : [],
         abstract: Array.isArray(doc.abstract) ? doc.abstract[0] : doc.abstract ? String(doc.abstract) : '',
         score: typeof doc.score === 'number' ? doc.score : undefined,
+        pdf_url: Array.isArray(doc.pdf_url) ? doc.pdf_url[0] : doc.pdf_url ? String(doc.pdf_url) : '',
+        abs_url: Array.isArray(doc.abs_url) ? doc.abs_url[0] : doc.abs_url ? String(doc.abs_url) : '',
     }));
 }
 
@@ -181,7 +271,7 @@ app.get('/api/search', async (req, res) => {
         const hints = analyzeQuery(rawQuery);
         const { params } = buildSearchParams(rawQuery, hints, rows, start, category, sort);
 
-        const solrRes = await axios.get(`${solrNode()}/select`, {
+        const solrRes = await fetchFromSolr('/select', {
             params,
             timeout: 5000,  // 5s — prevents hanging if Solr is slow
         });
@@ -222,11 +312,11 @@ app.get('/api/suggest', async (req, res) => {
         const lastToken = q.split(/\s+/).pop() || q;
         const finalQ = lastToken.length >= 2 ? `${q} ${lastToken}*` : q;
 
-        const solrRes = await axios.get(`${solrNode()}/select`, {
+        const solrRes = await fetchFromSolr('/select', {
             params: {
                 q: finalQ,
                 defType: 'edismax',
-                qf: 'title_ngram^3 title^6',
+                qf: 'title^6',
                 pf: 'title^10',
                 mm: '1',
                 fl: 'title',
@@ -260,7 +350,7 @@ app.get('/api/suggest', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.get('/api/papers', async (req, res) => {
     try {
-        const solrRes = await axios.get(`${solrNode()}/select`, {
+        const solrRes = await fetchFromSolr('/select', {
             params: {
                 q: '*:*',
                 rows: '1000',
@@ -282,13 +372,60 @@ app.get('/api/papers', async (req, res) => {
 // ===========================================================================
 // ADMIN AUTHENTICATION
 // ===========================================================================
-app.post('/api/login', (req, res) => {
-    const { password } = req.body;
-    if (password === ADMIN_PASSWORD) {
-        const token = jwt.sign({ role: 'admin' }, ADMIN_SECRET, { expiresIn: '1h' });
-        res.status(200).json({ token });
-    } else {
-        res.status(401).json({ error: 'Unauthorized: Incorrect Password' });
+// Admin registration (one-time, or for new admins)
+app.post('/api/register', async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
+    }
+    try {
+        const hash = await bcrypt.hash(password, 10);
+        await pgPool.query(
+            'INSERT INTO admins (username, password_hash) VALUES ($1, $2)',
+            [username, hash]
+        );
+        res.status(201).json({ success: true, message: 'Admin registered' });
+    } catch (err) {
+        if (err.code === '23505') {
+            res.status(409).json({ error: 'Username already exists' });
+        } else {
+            res.status(500).json({ error: 'Registration failed', details: err.message });
+        }
+    }
+});
+
+// Admin login (returns JWT)
+app.post('/api/login', async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
+    }
+    try {
+        const result = await pgPool.query('SELECT * FROM admins WHERE username = $1', [username]);
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        const admin = result.rows[0];
+        const valid = await bcrypt.compare(password, admin.password_hash);
+        if (!valid) {
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        const secret = process.env.ADMIN_SECRET || 'your_jwt_secret_here';
+        const refreshSecret = process.env.ADMIN_REFRESH_SECRET || 'your_refresh_secret_here';
+        const token = jwt.sign({ role: 'admin', username: admin.username }, secret, { expiresIn: '24h' });
+        const refreshToken = jwt.sign({ role: 'admin', username: admin.username }, refreshSecret, { expiresIn: '7d' });
+
+        // Store refresh token hash in DB
+        const tokenHash = require('crypto').createHash('sha256').update(refreshToken).digest('hex');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        await pgPool.query(
+            'INSERT INTO refresh_tokens (admin_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+            [admin.id, tokenHash, expiresAt]
+        );
+
+        res.status(200).json({ token, refreshToken });
+    } catch (err) {
+        res.status(500).json({ error: 'Login failed', details: err.message });
     }
 });
 
@@ -296,56 +433,198 @@ app.post('/api/login', (req, res) => {
 const verifyAdmin = (req, res, next) => {
     const token = req.headers['authorization'];
     if (!token) return res.status(403).json({ error: 'Forbidden: No token provided' });
-
-    jwt.verify(token, ADMIN_SECRET, (err) => {
+    const secret = process.env.ADMIN_SECRET || 'your_jwt_secret_here';
+    jwt.verify(token, secret, (err, decoded) => {
         if (err) return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+        req.user = decoded;
         next();
     });
 };
+
+// POST /api/refresh  — validate DB token, mint a new access token (token rotation)
+app.post('/api/refresh', async (req, res) => {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(401).json({ error: 'Refresh token required' });
+
+    const refreshSecret = process.env.ADMIN_REFRESH_SECRET || 'your_refresh_secret_here';
+    let user;
+    try {
+        user = jwt.verify(refreshToken, refreshSecret);
+    } catch {
+        return res.status(403).json({ error: 'Invalid or expired refresh token' });
+    }
+
+    try {
+        // Check token exists in DB and is not expired
+        const tokenHash = require('crypto').createHash('sha256').update(refreshToken).digest('hex');
+        const result = await pgPool.query(
+            'SELECT * FROM refresh_tokens WHERE token_hash = $1 AND expires_at > NOW()',
+            [tokenHash]
+        );
+        if (result.rows.length === 0) {
+            return res.status(403).json({ error: 'Refresh token revoked or expired' });
+        }
+
+        // Rotate: delete old token, issue a new pair
+        await pgPool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [tokenHash]);
+
+        const secret = process.env.ADMIN_SECRET || 'your_jwt_secret_here';
+        const newAccessToken = jwt.sign({ role: user.role, username: user.username }, secret, { expiresIn: '24h' });
+        const newRefreshToken = jwt.sign({ role: user.role, username: user.username }, refreshSecret, { expiresIn: '7d' });
+
+        const adminResult = await pgPool.query('SELECT id FROM admins WHERE username = $1', [user.username]);
+        const newTokenHash = require('crypto').createHash('sha256').update(newRefreshToken).digest('hex');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        await pgPool.query(
+            'INSERT INTO refresh_tokens (admin_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+            [adminResult.rows[0].id, newTokenHash, expiresAt]
+        );
+
+        res.status(200).json({ token: newAccessToken, refreshToken: newRefreshToken });
+    } catch (err) {
+        res.status(500).json({ error: 'Token refresh failed', details: err.message });
+    }
+});
+
+// POST /api/logout  — revoke the refresh token from DB
+app.post('/api/logout', async (req, res) => {
+    const { refreshToken } = req.body;
+    if (refreshToken) {
+        try {
+            const tokenHash = require('crypto').createHash('sha256').update(refreshToken).digest('hex');
+            await pgPool.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [tokenHash]);
+        } catch (err) {
+            console.error('Logout DB error:', err.message);
+        }
+    }
+    res.status(200).json({ success: true });
+});
 
 // ===========================================================================
 // ADMIN ROUTES  (require valid JWT)
 // ===========================================================================
 
-// POST /api/papers  — add a paper to Solr and invalidate Redis cache
-app.post('/api/papers', verifyAdmin, async (req, res) => {
+// PUT /api/admin/password  — change current admin password
+app.put('/api/admin/password', verifyAdmin, async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password required' });
+    if (newPassword.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    
     try {
-        const paper = req.body;
+        const result = await pgPool.query('SELECT * FROM admins WHERE username = $1', [req.user.username]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Admin not found' });
+        
+        const valid = await bcrypt.compare(currentPassword, result.rows[0].password_hash);
+        if (!valid) return res.status(401).json({ error: 'Incorrect current password' });
+        
+        const salt = await bcrypt.genSalt(10);
+        const hash = await bcrypt.hash(newPassword, salt);
+        await pgPool.query('UPDATE admins SET password_hash = $1 WHERE username = $2', [hash, req.user.username]);
 
-        if (!paper.title) {
-            return res.status(400).json({ error: 'Title is required' });
-        }
+        // Invalidate all existing refresh tokens for this user
+        await pgPool.query(
+            'DELETE FROM refresh_tokens WHERE admin_id = (SELECT id FROM admins WHERE username = $1)',
+            [req.user.username]
+        );
 
-        const solrDoc = {
-            id: paper.id || `QB-${Date.now()}`,
-            title: paper.title,
-            abstract: paper.abstract || '',
-            authors: paper.authors ?? [],
-            categories: paper.categories ?? [],
-        };
-
-        await axios.post(SOLR_UPDATE_URL, [solrDoc]);
-        await redisClient.flushAll();   // invalidate cached search results
-
-        res.status(200).json({ success: true, id: solrDoc.id });
+        res.status(200).json({ success: true, message: 'Password updated. All sessions have been revoked.' });
     } catch (err) {
-        console.error('Upload error:', err.message);
-        res.status(500).json({ error: 'Failed to upload to Solr' });
+        console.error('Password change error:', err.message);
+        res.status(500).json({ error: 'Failed to update password' });
     }
 });
 
-// DELETE /api/papers/:id  — remove a paper and invalidate Redis cache
+// POST /api/papers  — add a paper to Postgres
+app.post('/api/papers', verifyAdmin, async (req, res) => {
+    try {
+        const paper = req.body;
+        if (!paper.title) {
+            return res.status(400).json({ error: 'Title is required' });
+        }
+        const id = paper.id || `QB-${Date.now()}`;
+        await pgPool.query(
+            `INSERT INTO papers (id, title, abstract, authors, categories, published, updated, pdf_url, abs_url)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (id) DO UPDATE SET
+               title=EXCLUDED.title, abstract=EXCLUDED.abstract, authors=EXCLUDED.authors, categories=EXCLUDED.categories, published=EXCLUDED.published, updated=EXCLUDED.updated, pdf_url=EXCLUDED.pdf_url, abs_url=EXCLUDED.abs_url`,
+            [id, paper.title, paper.abstract || '', paper.authors || [], paper.categories || [], paper.published || null, paper.updated || null, paper.pdf_url || null, paper.abs_url || null]
+        );
+        
+        // Sync to Solr
+        await axios.post(SOLR_UPDATE_URL, [{
+            id: id,
+            title: paper.title,
+            abstract: paper.abstract || '',
+            authors: paper.authors || [],
+            categories: paper.categories || [],
+            pdf_url: paper.pdf_url || '',
+            abs_url: paper.abs_url || ''
+        }], { headers: { 'Content-Type': 'application/json' } });
+
+        await redisClient.flushAll();   // invalidate cached search results
+        res.status(200).json({ success: true, id });
+    } catch (err) {
+        console.error('Upload error:', err.message);
+        res.status(500).json({ error: 'Failed to upload to Postgres or Solr', details: err.message });
+    }
+});
+
+// GET /api/papers  — list all papers (public)
+app.get('/api/papers', async (req, res) => {
+    try {
+        const result = await pgPool.query('SELECT * FROM papers ORDER BY published DESC NULLS LAST, id DESC LIMIT 1000');
+        res.json({ numFound: result.rowCount, docs: result.rows });
+    } catch (err) {
+        console.error('Papers list error:', err.message);
+        res.status(500).json({ error: 'Failed to list papers', details: err.message });
+    }
+});
+
+// PUT /api/papers/:id  — update a paper (admin)
+app.put('/api/papers/:id', verifyAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const paper = req.body;
+        await pgPool.query(
+            `UPDATE papers SET title=$1, abstract=$2, authors=$3, categories=$4, published=$5, updated=$6, pdf_url=$7, abs_url=$8 WHERE id=$9`,
+            [paper.title, paper.abstract || '', paper.authors || [], paper.categories || [], paper.published || null, paper.updated || null, paper.pdf_url || null, paper.abs_url || null, id]
+        );
+
+        // Sync to Solr
+        await axios.post(SOLR_UPDATE_URL, [{
+            id: id,
+            title: paper.title,
+            abstract: paper.abstract || '',
+            authors: paper.authors || [],
+            categories: paper.categories || [],
+            pdf_url: paper.pdf_url || '',
+            abs_url: paper.abs_url || ''
+        }], { headers: { 'Content-Type': 'application/json' } });
+
+        await redisClient.flushAll();
+        res.status(200).json({ success: true, id });
+    } catch (err) {
+        console.error('Update error:', err.message);
+        res.status(500).json({ error: 'Failed to update paper', details: err.message });
+    }
+});
+
+// DELETE /api/papers/:id  — remove a paper
 app.delete('/api/papers/:id', verifyAdmin, async (req, res) => {
     try {
         const paperId = req.params.id;
+        await pgPool.query('DELETE FROM papers WHERE id = $1', [paperId]);
+        
+        // Delete from Solr
+        await axios.post(SOLR_UPDATE_URL, {
+            delete: { id: paperId }
+        }, { headers: { 'Content-Type': 'application/json' } });
 
-        await axios.post(SOLR_UPDATE_URL, { delete: { id: paperId } });
         await redisClient.flushAll();
-
         res.status(200).json({ success: true, id: paperId });
     } catch (err) {
         console.error('Delete error:', err.message);
-        res.status(500).json({ error: 'Failed to delete from Solr' });
+        res.status(500).json({ error: 'Failed to delete from Postgres or Solr', details: err.message });
     }
 });
 

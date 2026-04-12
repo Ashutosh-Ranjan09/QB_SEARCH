@@ -95,12 +95,15 @@ int main() {
     // Seed the random number generator
     srand(time(0)); 
 
+    const char* env_p = std::getenv("API_URL");
+    string base_url = env_p ? env_p : "http://localhost:3001/api";
+
     for (int i = 0; i < total_requests; ++i) {
         // Pick a random word from the list
         string random_word = search_terms[rand() % search_terms.size()];
         
         // Push the dynamic query to the Node.js server
-        url_queue.push("http://localhost:3000/search?q=" + random_word);
+        url_queue.push(base_url + "/search?q=" + random_word);
     }
     url_queue.set_finished();
     // all pushed

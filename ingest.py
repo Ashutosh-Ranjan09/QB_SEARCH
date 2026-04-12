@@ -3,7 +3,7 @@ import json
 import os
 
 # The Solr update endpoint for your specific collection
-SOLR_URL = "http://localhost:8983/solr/qb_collection/update?commit=true"
+SOLR_URL = os.environ.get("SOLR_UPDATE_URL", "http://localhost:8983/solr/qb_collection/update?commit=true")
 
 # Batching prevents us from overloading RAM or dropping HTTP connections
 BATCH_SIZE = 500 
@@ -26,7 +26,9 @@ def ingest_jsonl_file(filepath):
                     "title": paper.get("title", "No Title Provided"),
                     "authors": paper.get("authors", "Unknown Author"),
                     "categories": paper.get("categories", "cs.UNKNOWN"),
-                    "abstract": paper.get("abstract", "")
+                    "abstract": paper.get("abstract", ""),
+                    "pdf_url": paper.get("pdf_url", ""),
+                    "abs_url": paper.get("abs_url", "")
                 }
                 batch.append(doc)
                 

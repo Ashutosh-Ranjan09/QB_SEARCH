@@ -12,6 +12,8 @@ export interface Paper {
   authors: string[]
   categories: string[]
   abstract: string
+  pdf_url?: string
+  abs_url?: string
 }
 
 interface ResultCardProps {
@@ -28,8 +30,14 @@ export function ResultCard({ paper }: ResultCardProps) {
   return (
     <Card className="hover:shadow-md transition-shadow">
       <CardHeader className="pb-3">
-        <h3 className="text-lg md:text-xl font-semibold text-foreground leading-tight text-balance">
-          {paper.title}
+        <h3 className="text-lg md:text-xl font-semibold leading-tight text-balance w-fit">
+          {paper.pdf_url || paper.abs_url ? (
+            <a href={paper.pdf_url || paper.abs_url} target="_blank" rel="noopener noreferrer" className="text-foreground hover:underline hover:text-primary transition-colors">
+              {paper.title}
+            </a>
+          ) : (
+            <span className="text-foreground">{paper.title}</span>
+          )}
         </h3>
         <p className="text-sm text-muted-foreground mt-1">
           {paper.authors.join(", ")}
