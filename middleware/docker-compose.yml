@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Middleware API Server
+  middleware:
+    build: .
+    container_name: qb_middleware
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      REDIS_URL: redis://redis:6379
+      SOLR_NODES: http://host.docker.internal:8983/solr/qb_collection
+      PG_CONNECTION_STRING: ${PG_CONNECTION_STRING:-postgresql://user:password@host.docker.internal:5432/qb_db}
+    depends_on:
+      - redis
+    networks:
+      - qb_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Redis cache
+  redis:
+    image: redis:7-alpine
+    container_name: qb_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - qb_network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  qb_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local

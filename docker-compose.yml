@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # ZOOKEEPER ENSEMBLE (The Brain)
+  # ==========================================
+  zk1:
+    image: zookeeper:3.8
+    container_name: qb_zk1
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: server.1=zk1:2888:3888;2181 server.2=zk2:2888:3888;2181 server.3=zk3:2888:3888;2181
+
+  zk2:
+    image: zookeeper:3.8
+    container_name: qb_zk2
+    environment:
+      ZOO_MY_ID: 2
+      ZOO_SERVERS: server.1=zk1:2888:3888;2181 server.2=zk2:2888:3888;2181 server.3=zk3:2888:3888;2181
+
+  zk3:
+    image: zookeeper:3.8
+    container_name: qb_zk3
+    environment:
+      ZOO_MY_ID: 3
+      ZOO_SERVERS: server.1=zk1:2888:3888;2181 server.2=zk2:2888:3888;2181 server.3=zk3:2888:3888;2181
+
+  # ==========================================
+  # SOLR CLUSTER (The Muscle)
+  # ==========================================
+  solr1:
+    image: solr:10.0.0
+    container_name: qb_solr1
+    ports:
+      - "8983:8983"
+    environment:
+      - ZK_HOST=zk1:2181,zk2:2181,zk3:2181
+    depends_on:
+      - zk1
+      - zk2
+      - zk3
+
+  solr2:
+    image: solr:10.0.0
+    container_name: qb_solr2
+    ports:
+      - "8984:8983" 
+    environment:
+      - ZK_HOST=zk1:2181,zk2:2181,zk3:2181
+    depends_on:
+      - zk1
+      - zk2
+      - zk3
+
+  # # ==========================================
+  # # REDIS CACHE (The Memory)
+  # # ==========================================
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: qb_redis
+  #   ports:
+  #     - "6379:6379"
+
+  # # ==========================================
+  # # NODE.JS API GATEWAY (The Shield)
+  # # ==========================================
+  # api-gateway:
+  #   # IMPORTANT: Ensure this matches the exact name of your backend folder
+  #   build: ./middleware  
+  #   container_name: qb_api
+  #   ports:
+  #     - "3001:3001"
+  #   environment:
+  #     - REDIS_URL=redis://redis:6379
+  #     - SOLR_NODES=http://solr1:8983/solr/qb_collection,http://solr2:8983/solr/qb_collection
+  #   depends_on:
+  #     - redis
+  #     - solr1
+  #     - solr2
+
+  # # ==========================================
+  # # NEXT.JS FRONTEND (The Face)
+  # # ==========================================
+  # frontend:
+  #   # IMPORTANT: Ensure this matches the exact name of your frontend folder
+  #   build: ./Quadbase_frontend  
+  #   container_name: qb_frontend
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - NEXT_PUBLIC_API_URL=http://localhost:3001
+  #   depends_on:
+  #     - api-gateway
