@@ -1,31 +1,31 @@
-#include<bits/stdc++.h>
+#include <bits/stdc++.h>
 #include <thread>
 #include <mutex>
-#include <condition_variable>// for putting threads to sleep/wakeup
-#include <chrono>//time 
-#include <curl/curl.h>//http req
+#include <condition_variable>
+#include <chrono>
+#include <curl/curl.h>
 using namespace std;
 
-// --- Thread-Safe Queue  ---
+// --- Thread-Safe Queue ---
 template <typename T>
-class SafeQueue {// to make in mutually exclusive etc
+class SafeQueue {
 private:
     queue<T> q;
     mutex m;
     condition_variable cv;
-    bool finished=false;
+    bool finished = false;
 public:
     void push(T item) {
-        lock_guard<mutex> lock(m);//locking queue//object creation to lock
+        lock_guard<mutex> lock(m);
         q.push(item);
         cv.notify_one();
-    }// unlocked when scope is finished
+    }
 
     bool pop(T& item) {
-        unique_lock<mutex> lock(m); //locks but allows cv to unlock it temply
-        cv.wait(lock, [this] { return !q.empty() || finished; });// to check whether to sleep or wakeup
-        if (q.empty()) return false;//reaches here only if m i slocked
-        item = q.front();// pass by reference
+        unique_lock<mutex> lock(m);
+        cv.wait(lock, [this] { return !q.empty() || finished; });
+        if (q.empty()) return false;
+        item = q.front();
         q.pop();
         return true;
     }
@@ -43,22 +43,29 @@ struct Result {
     long http_code;
 };
 
-// --- Worker Function  ---
+// --- Silencer Function ---
+// This prevents libcurl from spamming the terminal with JSON or HTML error pages
+size_t drop_output(void *contents, size_t size, size_t nmemb, void *userp) {
+    return size * nmemb; 
+}
+
+// --- Worker Function ---
 void worker(SafeQueue<string>& url_queue, vector<Result>& results, mutex& res_mutex) {
-    // Each thread gets its own CURL handle to act as a connection pool [cite: 29]
     CURL* curl = curl_easy_init();
     if (!curl) return;
 
-    // Enable TCP Keep-Alive for socket reuse [cite: 21]
+    // Enable TCP Keep-Alive for socket reuse
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    // keep tcp alive and turn it on=1
+    
+    // Tell libcurl to silently drop the response body using our function above
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, drop_output);
+
     string url;
     while (url_queue.pop(url)) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // Just test connectivity for now
 
         auto start = chrono::high_resolution_clock::now();
-        CURLcode res = curl_easy_perform(curl);// call the url
+        CURLcode res = curl_easy_perform(curl);
         auto end = chrono::high_resolution_clock::now();
 
         if (res == CURLE_OK) {
@@ -67,64 +74,50 @@ void worker(SafeQueue<string>& url_queue, vector<Result>& results, mutex& res_mu
             
             double elapsed = chrono::duration<double, milli>(end - start).count();
             
-            lock_guard<mutex> lock(res_mutex);// locking result vector
+            lock_guard<mutex> lock(res_mutex);
             results.push_back({elapsed, response_code});
         }
     }
     curl_easy_cleanup(curl);
 }
 
-int main() {
-    curl_global_init(CURL_GLOBAL_ALL);
-
+// --- Experiment Runner ---
+void run_experiment(const string& experiment_name, const string& target_url, int total_requests, int num_threads) {
     SafeQueue<string> url_queue;
     vector<Result> results;
     mutex res_mutex;
-    
-    int num_threads = thread::hardware_concurrency(); // although we can create more using using pthread directly
-    // cout<<"NUM THREADS: "<<num_threads<<"\n";
-    int total_requests = 1000; 
 
-    // 1. Fill Queue with Solr Queries
-    // A list of realistic search terms based on your Solr documents
     vector<string> search_terms = {
         "C++", "Python", "Operating", "Architecture", "Memory", 
         "competitive", "kernel", "TCP", "routing", "ingestion"
     };
 
-    // Seed the random number generator
-    srand(time(0)); 
-
-    const char* env_p = std::getenv("API_URL");
-    string base_url = env_p ? env_p : "http://localhost:3001/api";
-
+    // 1. Fill Queue
     for (int i = 0; i < total_requests; ++i) {
-        // Pick a random word from the list
         string random_word = search_terms[rand() % search_terms.size()];
-        
-        // Push the dynamic query to the Node.js server
-        url_queue.push(base_url + "/search?q=" + random_word);
+        url_queue.push(target_url + random_word);
     }
     url_queue.set_finished();
-    // all pushed
-    // 2. Start Timing and Spawn Threads 
-    cout << "Starting stress test with " << num_threads << " threads..." << endl;
+
+    cout << "\n======================================================\n";
+    cout << "🚀 STARTING: " << experiment_name << "\n";
+    cout << "🔗 Target:   " << target_url << "\n";
+    cout << "======================================================\n";
+
+    // 2. Start Timing and Spawn Threads
     auto start_time = chrono::high_resolution_clock::now();
 
     vector<thread> workers;
     for (int i = 0; i < num_threads; ++i) {
         workers.emplace_back(worker, ref(url_queue), ref(results), ref(res_mutex));
     }
-    //workers.push_back(thread(worker,ref(url_queue),ref..));
     for (auto& t : workers) t.join();
 
     auto end_time = chrono::high_resolution_clock::now();
     double total_duration = chrono::duration<double>(end_time - start_time).count();
 
-    // 3. Calculate Baseline Metrics [cite: 30]
-
-    if(results.size())
-    {
+    // 3. Calculate Metrics
+    if (!results.empty()) {
         sort(results.begin(), results.end(), [](Result a, Result b) {
             return a.duration_ms < b.duration_ms;
         });
@@ -132,20 +125,47 @@ int main() {
         double qps = results.size() / total_duration;
         double p50 = results[results.size() * 0.5].duration_ms;
         double p95 = results[results.size() * 0.95].duration_ms;
+        
+        // Count HTTP 429s (Rate Limited) to show the middleware working
+        int rate_limited_count = 0;
+        for (const auto& r : results) {
+            if (r.http_code == 429) rate_limited_count++;
+        }
 
-        cout << "--- Baseline Metrics ---" << endl;
-        cout << "Total Requests: " << results.size() << endl;
-        cout << "Total Time:     " << total_duration << " s" << endl;
-        cout << "QPS:            " << qps << " req/s" << endl;
-        cout << "p50 Latency:    " << p50 << " ms" << endl;
-        cout << "p95 Latency:    " << p95 << " ms" << endl;
+        cout << "--- Results ---\n";
+        cout << "Total Requests: " << results.size() << " (" << rate_limited_count << " Rate Limited)\n";
+        cout << "Total Time:     " << total_duration << " s\n";
+        cout << "QPS:            " << qps << " req/s\n";
+        cout << "p50 Latency:    " << p50 << " ms\n";
+        cout << "p95 Latency:    " << p95 << " ms\n";
+    } else {
+        cout << "--- Error ---\n";
+        cout << "All requests failed! Is the target server running?\n";
     }
-    else
-    {
-        cout << "--- Error ---" << endl;
-        cout << "All " << total_requests << " requests failed!" << endl;
-        cout << "Is your Solr cluster currently running on ports 8983 and 8984?" << endl;
-    }
+}
+
+int main() {
+    curl_global_init(CURL_GLOBAL_ALL);
+    srand(time(0));
+
+    int num_threads = thread::hardware_concurrency();
+    int total_requests = 1000; 
+
+    // === EXPERIMENT A: UNPROTECTED SOLR ===
+    // Hits Solr directly, skipping Node.js
+    string solr_url = "http://localhost:8983/solr/qb_collection/select?q=";
+    run_experiment("EXPERIMENT A: Unprotected Baseline", solr_url, total_requests, num_threads);
+
+    // Let the network breathe so we don't exhaust TCP ports (TIME_WAIT)
+    cout << "\n[Sleeping 3 seconds before next test...]\n";
+    this_thread::sleep_for(chrono::seconds(3));
+
+    // === EXPERIMENT B: PROTECTED MIDDLEWARE ===
+    // Hits your Express API with Redis Caching and Rate Limiting
+    string nodejs_url = "http://localhost:3001/api/search?q=";
+    run_experiment("EXPERIMENT B: Protected Middleware", nodejs_url, total_requests, num_threads);
+
     curl_global_cleanup();
+    cout << "\n✅ Testing Complete.\n";
     return 0;
 }

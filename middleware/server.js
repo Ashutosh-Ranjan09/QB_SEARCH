@@ -4,6 +4,7 @@ const axios = require('axios');
 const redis = require('redis');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
@@ -254,7 +255,34 @@ function normaliseDocs(docs) {
 // ---------------------------------------------------------------------------
 // GET /api/search  — full eDisMax search pipeline with Redis caching
 // ---------------------------------------------------------------------------
-app.get('/api/search', async (req, res) => {
+
+const searchLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 100, // limit each IP to 100 requests per windowMs
+    message: { error: 'Too many requests from this IP, please try again after a minute.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+const sanitizeQuery = (req, res, next) => {
+    let q = req.query.q;
+    if (!q) return next();
+
+    // Rule 1: Length check buffer prevention
+    if (q.length > 150) {
+        return res.status(400).json({ error: 'Query string too long. Max 150 characters.' });
+    }
+
+    // Rule 2: Strip dangerous Lucene special characters to avoid massive recursive trees
+    req.query.q = q.replace(/[\+\-\&\|\!\(\)\{\}\[\]\^\"\~\*\?\:\\]/g, ' ').trim();
+    if (req.query.q.length === 0) {
+        return res.status(400).json({ error: 'Invalid search query' });
+    }
+    
+    next();
+};
+
+app.get('/api/search', searchLimiter, sanitizeQuery, async (req, res) => {
     try {
         const rawQuery = req.query.q || '*:*';
         const rows = parseInt(req.query.rows || '20', 10);
