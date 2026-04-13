@@ -220,15 +220,24 @@ export default function AdminDashboardPage() {
 
         <Tabs defaultValue="upload" className="w-full">
           <TabsList className="grid w-full max-w-2xl grid-cols-3 mb-6">
-            <TabsTrigger value="upload" className="gap-2">
+            <TabsTrigger
+              value="upload"
+              className="gap-2 cursor-pointer hover:bg-accent/70 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:border-primary"
+            >
               <Upload className="h-4 w-4" />
               Upload Paper
             </TabsTrigger>
-            <TabsTrigger value="manage" className="gap-2">
+            <TabsTrigger
+              value="manage"
+              className="gap-2 cursor-pointer hover:bg-accent/70 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:border-primary"
+            >
               <List className="h-4 w-4" />
               Manage Papers
             </TabsTrigger>
-            <TabsTrigger value="security" className="gap-2">
+            <TabsTrigger
+              value="security"
+              className="gap-2 cursor-pointer hover:bg-accent/70 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:border-primary"
+            >
               <Key className="h-4 w-4" />
               Security
             </TabsTrigger>
