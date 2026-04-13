@@ -12,6 +12,16 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { useAuth, apiFetch } from "@/lib/auth-context"
 import type { Paper } from "@/components/result-card"
 
@@ -37,6 +47,7 @@ export default function AdminDashboardPage() {
   const [uploadError, setUploadError] = useState<string | null>(null)
 
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [paperToDelete, setPaperToDelete] = useState<{id: string, title: string} | null>(null)
 
   const [passwordData, setPasswordData] = useState({ currentPassword: "", newPassword: "" })
   const [passwordLoading, setPasswordLoading] = useState(false)
@@ -146,7 +157,7 @@ export default function AdminDashboardPage() {
     }
   }
 
-  const handleDelete = async (id: string) => {
+  const executeDelete = async (id: string) => {
     setDeletingId(id)
     const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"
     try {
@@ -162,6 +173,7 @@ export default function AdminDashboardPage() {
       alert(err instanceof Error ? err.message : "Delete failed")
     } finally {
       setDeletingId(null)
+      setPaperToDelete(null)
     }
   }
 
@@ -208,15 +220,24 @@ export default function AdminDashboardPage() {
 
         <Tabs defaultValue="upload" className="w-full">
           <TabsList className="grid w-full max-w-2xl grid-cols-3 mb-6">
-            <TabsTrigger value="upload" className="gap-2">
+            <TabsTrigger
+              value="upload"
+              className="gap-2 cursor-pointer hover:bg-accent/70 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:border-primary"
+            >
               <Upload className="h-4 w-4" />
               Upload Paper
             </TabsTrigger>
-            <TabsTrigger value="manage" className="gap-2">
+            <TabsTrigger
+              value="manage"
+              className="gap-2 cursor-pointer hover:bg-accent/70 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:border-primary"
+            >
               <List className="h-4 w-4" />
               Manage Papers
             </TabsTrigger>
-            <TabsTrigger value="security" className="gap-2">
+            <TabsTrigger
+              value="security"
+              className="gap-2 cursor-pointer hover:bg-accent/70 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:border-primary"
+            >
               <Key className="h-4 w-4" />
               Security
             </TabsTrigger>
@@ -449,7 +470,7 @@ export default function AdminDashboardPage() {
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                onClick={() => handleDelete(paper.id)}
+                                onClick={() => setPaperToDelete({ id: paper.id, title: paper.title })}
                                 disabled={deletingId === paper.id}
                                 className="text-destructive hover:text-destructive hover:bg-destructive/10"
                               >
@@ -501,6 +522,41 @@ export default function AdminDashboardPage() {
           </TabsContent>
         </Tabs>
       </main>
+
+      <AlertDialog open={!!paperToDelete} onOpenChange={(open) => !open && setPaperToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This action cannot be undone. This will permanently delete the paper
+              <span className="font-semibold text-foreground"> "{paperToDelete?.title}" </span>
+              and remove it from the Solr index.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={!!deletingId}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault()
+                if (paperToDelete) {
+                  executeDelete(paperToDelete.id)
+                }
+              }}
+              disabled={!!deletingId}
+            >
+              {deletingId ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete Paper"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

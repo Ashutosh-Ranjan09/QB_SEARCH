@@ -59,7 +59,7 @@ export function ResultCard({ paper }: ResultCardProps) {
             variant="ghost"
             size="sm"
             onClick={() => setExpanded(!expanded)}
-            className="mt-3 text-primary hover:text-primary/80 px-0"
+            className="mt-3 px-0 text-primary hover:text-primary hover:bg-transparent focus-visible:bg-transparent"
           >
             {expanded ? (
               <>

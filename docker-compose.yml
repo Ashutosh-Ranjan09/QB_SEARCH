@@ -1,95 +1,224 @@
-version: '3.8'
+# ============================================================
+# QuadBase — Full Stack docker-compose
+# Services: ZooKeeper × 3, Solr × 2, Redis, Middleware, Frontend
+# ============================================================
+
+networks:
+  qb_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  solr1_data:
+  solr2_data:
 
 services:
+
   # ==========================================
-  # ZOOKEEPER ENSEMBLE (The Brain)
+  # ZOOKEEPER ENSEMBLE (Coordination Layer)
   # ==========================================
   zk1:
     image: zookeeper:3.8
     container_name: qb_zk1
-    ports:
-      - "2181:2181"
+    restart: unless-stopped
+    networks:
+      - qb_network
     environment:
       ZOO_MY_ID: 1
       ZOO_SERVERS: server.1=zk1:2888:3888;2181 server.2=zk2:2888:3888;2181 server.3=zk3:2888:3888;2181
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   zk2:
     image: zookeeper:3.8
     container_name: qb_zk2
+    restart: unless-stopped
+    networks:
+      - qb_network
     environment:
       ZOO_MY_ID: 2
       ZOO_SERVERS: server.1=zk1:2888:3888;2181 server.2=zk2:2888:3888;2181 server.3=zk3:2888:3888;2181
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   zk3:
     image: zookeeper:3.8
     container_name: qb_zk3
+    restart: unless-stopped
+    networks:
+      - qb_network
     environment:
       ZOO_MY_ID: 3
       ZOO_SERVERS: server.1=zk1:2888:3888;2181 server.2=zk2:2888:3888;2181 server.3=zk3:2888:3888;2181
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # ==========================================
-  # SOLR CLUSTER (The Muscle)
+  # SOLR CLUSTER (Search Engine)
   # ==========================================
   solr1:
     image: solr:10.0.0
     container_name: qb_solr1
+    restart: unless-stopped
+    networks:
+      - qb_network
     ports:
       - "8983:8983"
     environment:
       - ZK_HOST=zk1:2181,zk2:2181,zk3:2181
+    volumes:
+      - solr1_data:/var/solr
     depends_on:
-      - zk1
-      - zk2
-      - zk3
+      zk1:
+        condition: service_healthy
+      zk2:
+        condition: service_healthy
+      zk3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8983/solr/admin/info/system"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   solr2:
     image: solr:10.0.0
     container_name: qb_solr2
+    restart: unless-stopped
+    networks:
+      - qb_network
     ports:
-      - "8984:8983" 
+      - "8984:8983"
     environment:
       - ZK_HOST=zk1:2181,zk2:2181,zk3:2181
+    volumes:
+      - solr2_data:/var/solr
     depends_on:
-      - zk1
-      - zk2
-      - zk3
+      zk1:
+        condition: service_healthy
+      zk2:
+        condition: service_healthy
+      zk3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8983/solr/admin/info/system"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
-  # # ==========================================
-  # # REDIS CACHE (The Memory)
-  # # ==========================================
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: qb_redis
-  #   ports:
-  #     - "6379:6379"
+  # ==========================================
+  # REDIS CACHE (Session / Rate-limit Memory)
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: qb_redis
+    restart: unless-stopped
+    networks:
+      - qb_network
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
-  # # ==========================================
-  # # NODE.JS API GATEWAY (The Shield)
-  # # ==========================================
-  # api-gateway:
-  #   # IMPORTANT: Ensure this matches the exact name of your backend folder
-  #   build: ./middleware  
-  #   container_name: qb_api
-  #   ports:
-  #     - "3001:3001"
-  #   environment:
-  #     - REDIS_URL=redis://redis:6379
-  #     - SOLR_NODES=http://solr1:8983/solr/qb_collection,http://solr2:8983/solr/qb_collection
-  #   depends_on:
-  #     - redis
-  #     - solr1
-  #     - solr2
+  solr-init:
+    image: solr:10.0.0
+    container_name: qb_solr_init
+    networks:
+      - qb_network
+    depends_on:
+      solr1:
+        condition: service_healthy
+      solr2:
+        condition: service_healthy
+    entrypoint:
+      - bash
+      - "-c"
+      - |
+        # We wait for solr1 to be healthy, then create the collection.
+        # It's okay if this errors out if the collection already exists.
+        echo "Creating qb_collection..."
+        curl -s "http://solr1:8983/solr/admin/collections?action=CREATE&name=qb_collection&numShards=2&replicationFactor=2" || exit 0
+        echo "Collection ready!"
 
-  # # ==========================================
-  # # NEXT.JS FRONTEND (The Face)
-  # # ==========================================
-  # frontend:
-  #   # IMPORTANT: Ensure this matches the exact name of your frontend folder
-  #   build: ./Quadbase_frontend  
-  #   container_name: qb_frontend
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - NEXT_PUBLIC_API_URL=http://localhost:3001
-  #   depends_on:
-  #     - api-gateway
+  # ==========================================
+  # NODE.JS MIDDLEWARE / API GATEWAY
+  # ==========================================
+  middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    container_name: qb_middleware
+    restart: unless-stopped
+    networks:
+      - qb_network
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      REDIS_URL: redis://redis:6379
+      SOLR_NODES: http://solr1:8983/solr/qb_collection,http://solr2:8983/solr/qb_collection
+      SOLR_UPDATE_URL: http://solr1:8983/solr/qb_collection/update?commit=true
+      PG_CONNECTION_STRING: ${PG_CONNECTION_STRING}
+      ADMIN_SECRET: ${ADMIN_SECRET}
+    depends_on:
+      redis:
+        condition: service_healthy
+      solr1:
+        condition: service_healthy
+      solr2:
+        condition: service_healthy
+      solr-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ==========================================
+  # NEXT.JS FRONTEND
+  # ==========================================
+  frontend:
+    build:
+      context: ./Quadbase_frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the Next.js build at compile time
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    container_name: qb_frontend
+    restart: unless-stopped
+    networks:
+      - qb_network
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      # Server-side env vars (not baked in, read at runtime by Next.js API routes)
+      SOLR_BASE_URL: http://solr1:8983
+      SOLR_COLLECTION: qb_collection
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      middleware:
+        condition: service_healthy
