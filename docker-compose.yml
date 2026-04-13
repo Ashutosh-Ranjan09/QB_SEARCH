@@ -181,6 +181,7 @@ services:
       SOLR_UPDATE_URL: http://solr1:8983/solr/qb_collection/update?commit=true
       PG_CONNECTION_STRING: ${PG_CONNECTION_STRING}
       ADMIN_SECRET: ${ADMIN_SECRET}
+      ADMIN_REFRESH_SECRET: ${ADMIN_REFRESH_SECRET}
     depends_on:
       redis:
         condition: service_healthy
@@ -215,10 +216,6 @@ services:
       - "3000:3000"
     environment:
       NODE_ENV: production
-      # Server-side env vars (not baked in, read at runtime by Next.js API routes)
-      SOLR_BASE_URL: http://solr1:8983
-      SOLR_COLLECTION: qb_collection
-      JWT_SECRET: ${JWT_SECRET}
     depends_on:
       middleware:
         condition: service_healthy

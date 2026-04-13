@@ -3,8 +3,9 @@ npm-debug.log
 .git
 .gitignore
 README.md
-.env.local
-.env.*.local
+# Exclude ALL .env files — secrets are injected by docker-compose at runtime
+.env
+.env.*
 .next
 dist
 build
@@ -15,3 +16,7 @@ coverage
 *~
 .vscode
 .idea
+# Migration/sync scripts are one-time tools, not needed in the production image
+migrate_to_pg.js
+sync_pg_to_solr.js
+docker-compose.yml
