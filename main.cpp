@@ -3,6 +3,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <fstream>
 #include <curl/curl.h>
 using namespace std;
 
@@ -44,7 +45,6 @@ struct Result {
 };
 
 // --- Silencer Function ---
-// This prevents libcurl from spamming the terminal with JSON or HTML error pages
 size_t drop_output(void *contents, size_t size, size_t nmemb, void *userp) {
     return size * nmemb; 
 }
@@ -57,7 +57,7 @@ void worker(SafeQueue<string>& url_queue, vector<Result>& results, mutex& res_mu
     // Enable TCP Keep-Alive for socket reuse
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     
-    // Tell libcurl to silently drop the response body using our function above
+    // Tell libcurl to silently drop the response body
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, drop_output);
 
     string url;
@@ -82,7 +82,7 @@ void worker(SafeQueue<string>& url_queue, vector<Result>& results, mutex& res_mu
 }
 
 // --- Experiment Runner ---
-void run_experiment(const string& experiment_name, const string& target_url, int total_requests, int num_threads) {
+void run_experiment(const string& experiment_name, const string& target_url, int total_requests, int num_threads, ofstream& csv_file) {
     SafeQueue<string> url_queue;
     vector<Result> results;
     mutex res_mutex;
@@ -99,10 +99,7 @@ void run_experiment(const string& experiment_name, const string& target_url, int
     }
     url_queue.set_finished();
 
-    cout << "\n======================================================\n";
-    cout << "🚀 STARTING: " << experiment_name << "\n";
-    cout << "🔗 Target:   " << target_url << "\n";
-    cout << "======================================================\n";
+    cout << "Running " << experiment_name << " with " << total_requests << " requests...\n";
 
     // 2. Start Timing and Spawn Threads
     auto start_time = chrono::high_resolution_clock::now();
@@ -126,21 +123,25 @@ void run_experiment(const string& experiment_name, const string& target_url, int
         double p50 = results[results.size() * 0.5].duration_ms;
         double p95 = results[results.size() * 0.95].duration_ms;
         
-        // Count HTTP 429s (Rate Limited) to show the middleware working
-        int rate_limited_count = 0;
+        // Count HTTP 429s (Rate Limited) or 500s (Server Error)
+        int failed_count = 0;
         for (const auto& r : results) {
-            if (r.http_code == 429) rate_limited_count++;
+            if (r.http_code == 429 || r.http_code >= 500) failed_count++;
         }
+        
+        // Calculate true success rate percentage
+        double success_rate = ((double)(results.size() - failed_count) / total_requests) * 100.0;
 
-        cout << "--- Results ---\n";
-        cout << "Total Requests: " << results.size() << " (" << rate_limited_count << " Rate Limited)\n";
-        cout << "Total Time:     " << total_duration << " s\n";
-        cout << "QPS:            " << qps << " req/s\n";
-        cout << "p50 Latency:    " << p50 << " ms\n";
-        cout << "p95 Latency:    " << p95 << " ms\n";
+        // WRITE TO CSV
+        csv_file << experiment_name << "," 
+                 << num_threads << "," 
+                 << qps << "," 
+                 << p50 << "," 
+                 << p95 << "," 
+                 << success_rate << "\n";
+
     } else {
-        cout << "--- Error ---\n";
-        cout << "All requests failed! Is the target server running?\n";
+        cout << "All requests failed for " << experiment_name << "!\n";
     }
 }
 
@@ -149,23 +150,36 @@ int main() {
     srand(time(0));
 
     int num_threads = thread::hardware_concurrency();
-    int total_requests = 1000; 
+    
+    // Test volumes for plotting
+    vector<int> load_volumes = {500, 1000, 2500, 5000, 10000, 15000}; 
 
-    // === EXPERIMENT A: UNPROTECTED SOLR ===
-    // Hits Solr directly, skipping Node.js
     string solr_url = "http://localhost:8983/solr/qb_collection/select?q=";
-    run_experiment("EXPERIMENT A: Unprotected Baseline", solr_url, total_requests, num_threads);
-
-    // Let the network breathe so we don't exhaust TCP ports (TIME_WAIT)
-    cout << "\n[Sleeping 3 seconds before next test...]\n";
-    this_thread::sleep_for(chrono::seconds(3));
-
-    // === EXPERIMENT B: PROTECTED MIDDLEWARE ===
-    // Hits your Express API with Redis Caching and Rate Limiting
     string nodejs_url = "http://localhost:3001/api/search?q=";
-    run_experiment("EXPERIMENT B: Protected Middleware", nodejs_url, total_requests, num_threads);
 
+    // Open CSV file and write the header row
+    ofstream csv_file("combined_benchmark_results.csv");
+    csv_file << "Experiment,Concurrency_Level,QPS,p50_Latency_ms,p95_Latency_ms,Success_Rate\n";
+
+    cout << "\n======================================================\n";
+    cout << "🚀 STARTING AUTOMATED LOAD TEST SUITE\n";
+    cout << "======================================================\n";
+
+    // Loop through each load volume to gather plot data
+    for (int total_requests : load_volumes) {
+        run_experiment("Unprotected Baseline", solr_url, total_requests, num_threads, csv_file);
+        
+        // Let the network breathe
+        this_thread::sleep_for(chrono::seconds(2));
+
+        run_experiment("Protected Middleware", nodejs_url, total_requests, num_threads, csv_file);
+        
+        this_thread::sleep_for(chrono::seconds(2));
+    }
+
+    csv_file.close();
     curl_global_cleanup();
-    cout << "\n✅ Testing Complete.\n";
+    
+    cout << "\n✅ Testing Complete. Results saved to 'combined_benchmark_results.csv'.\n";
     return 0;
 }

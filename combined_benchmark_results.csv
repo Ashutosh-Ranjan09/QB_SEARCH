@@ -1,0 +1,13 @@
+Experiment,Concurrency_Level,QPS,p50_Latency_ms,p95_Latency_ms,Success_Rate
+Unprotected Baseline,20,1194.03,14.7322,32.3879,100
+Protected Middleware,20,515.198,8.0455,274.127,20
+Unprotected Baseline,20,2549.52,6.81855,15.7798,100
+Protected Middleware,20,3753.76,4.60216,8.60135,0
+Unprotected Baseline,20,3669.97,4.9719,9.69576,100
+Protected Middleware,20,4956.44,3.20652,6.88389,0
+Unprotected Baseline,20,3371.54,5.07667,11.7386,100
+Protected Middleware,20,7231.18,2.2211,4.84918,0
+Unprotected Baseline,20,4997.31,3.62877,6.787,100
+Protected Middleware,20,7621.16,2.08751,4.93278,0
+Unprotected Baseline,20,7331.18,2.35427,4.84874,100
+Protected Middleware,20,8018.94,1.96444,4.45657,0
