@@ -32,7 +32,7 @@ Make sure you have [Docker](https://docs.docker.com/get-docker/) and [Docker Com
 ### 1. Boot up the Infrastructure
 The entire clustered backend, middleware, and frontend can be spun up through the defined container orchestrator:
 ```bash
-docker-compose up --build -d
+ docker compose up -d --build
 ```
 *Note: Upon initial startup, Solr will wait for Zookeeper quorum to form. A custom init script automatically provisions the 2-shard, 2-replica `qb_collection` index.*
 
